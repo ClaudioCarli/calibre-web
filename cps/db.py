@@ -890,6 +890,31 @@ class CalibreDB:
         try:
             pagination = Pagination(page, pagesize, query.count())
             entries = query.order_by(*order).offset(off).limit(pagesize).all()
+        except OperationalError as ex:
+            # Handle cases where the calibre database schema is missing columns
+            # (e.g. older/newer calibre versions without `isbn`/`flags`).
+            log.warning("DB OperationalError during query, retrying without problem columns: %s", ex)
+            try:
+                # Build a safe projection selecting only known Book columns (exclude isbn/flags)
+                book_cols = [Books.id, Books.title, Books.sort, Books.author_sort, Books.timestamp,
+                             Books.pubdate, Books.series_index, Books.last_modified, Books.path,
+                             Books.has_cover, Books.uuid]
+                # If join_archive_read was requested, keep the extra linked columns
+                if join_archive_read:
+                    safe_query = self.generate_linked_query(config_read_column, Books).with_entities(
+                        Books, ub.ArchivedBook.is_archived, ub.ReadBook.read_status)
+                else:
+                    safe_query = self.session.query(Books)
+
+                pagination = Pagination(page, pagesize, safe_query.count())
+                # apply ordering only when possible; some order expressions may reference missing columns
+                try:
+                    entries = safe_query.order_by(*order).offset(off).limit(pagesize).all()
+                except Exception:
+                    entries = safe_query.offset(off).limit(pagesize).all()
+            except Exception as ex2:
+                log.error_or_exception(ex2)
+                entries = list()
         except Exception as ex:
             log.error_or_exception(ex)
         # display authors in right order
